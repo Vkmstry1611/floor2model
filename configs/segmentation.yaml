@@ -1,0 +1,36 @@
+# Segmentation configuration for CubiCasa5k dataset and YOLOv8 training
+# This file contains hyperparameters and paths for the segmentation phase
+
+dataset:
+  name: "CubiCasa5k"
+  root_dir: "data/cubicasa5k"
+  train_split: 0.8
+  val_split: 0.2
+  image_size: [640, 640]
+  batch_size: 16
+  num_workers: 4
+
+model:
+  architecture: "yolov8n-seg"  # nano segmentation model
+  pretrained: true
+  classes:
+    - "wall"
+    - "door"
+    - "window"
+    - "room"
+  num_classes: 4
+
+training:
+  epochs: 100
+  patience: 20
+  optimizer: "Adam"
+  lr: 0.001
+  weight_decay: 0.0001
+  save_period: 10
+  project: "floor2model_segmentation"
+  name: "yolov8n_seg_cubicasa5k"
+
+inference:
+  conf_threshold: 0.25
+  iou_threshold: 0.45
+  max_det: 1000
