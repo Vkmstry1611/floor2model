@@ -76,14 +76,16 @@ class ReconstructionPipeline:
         geometry_result,
         output_dir: Optional[str] = None,
         stem: Optional[str] = None,
+        floorplan_image_path: Optional[str] = None,
     ) -> Model3D:
         """
         Run the full Phase 4 pipeline.
 
         Args:
-            geometry_result: GeometryResult from GeometryPipeline (Phase 3).
-            output_dir:      Override output directory.
-            stem:            Override output filename stem.
+            geometry_result:      GeometryResult from GeometryPipeline (Phase 3).
+            output_dir:           Override output directory.
+            stem:                 Override output filename stem.
+            floorplan_image_path: Path to original floor plan image (used as ground texture).
 
         Returns:
             Model3D with building geometry and export paths.
@@ -100,15 +102,72 @@ class ReconstructionPipeline:
             pixels_per_metre=geometry_result.scale.pixels_per_metre,
         )
 
+        # ── Compute global origin from ALL detection points ────────────────
+        # Collect every pixel coordinate from polygons + raw bboxes so that
+        # all meshes share one coordinate frame and stay in their correct
+        # positions relative to each other (matching the detection layout).
+        seg = getattr(geometry_result, "segmentation_result", None)
+        all_pts_for_origin = []
+
+        for poly in geometry_result.vectorization.all_polygons:
+            if poly.points:
+                all_pts_for_origin.extend(poly.points)
+
+        if seg is not None:
+            for elem in seg.elements:
+                x1, y1, x2, y2 = elem.bbox
+                all_pts_for_origin.extend([(x1, y1), (x2, y2)])
+
+        if all_pts_for_origin:
+            origin = np.array(all_pts_for_origin, dtype=np.float32).mean(axis=0)
+            extruder.set_global_origin(origin)
+            print(f"  Global origin: ({origin[0]:.1f}, {origin[1]:.1f}) px")
+
         meshes: list[Mesh3D] = []
 
-        # Extrude walls and rooms
-        for poly in geometry_result.vectorization.all_polygons:
-            if len(poly.points) < 3:
-                continue
-            mesh = extruder.extrude_polygon(poly.points, label=poly.class_name)
-            if mesh.vertex_count > 0:
-                meshes.append(mesh)
+        WALL_LABELS = {"OuterWall", "InnerWall", "wall"}
+        DOOR_LABELS = {"Door", "door"}
+
+        seg = getattr(geometry_result, "segmentation_result", None)
+        has_raw_detections = seg is not None and len(seg.elements) > 0
+
+        if has_raw_detections:
+            # ── Primary path: bbox-based extrusion ────────────────────────
+            # When raw detections exist, generate walls and doors ONLY from
+            # their bounding boxes — no polygon duplicates.
+            # Non-wall/door polygons (windows, rooms) still come from masks.
+            wall_count = door_count = 0
+            for elem in seg.elements:
+                if elem.class_name in WALL_LABELS:
+                    m = extruder.extrude_bbox_wall(elem.bbox, label=elem.class_name)
+                    if m.vertex_count > 0:
+                        meshes.append(m)
+                        wall_count += 1
+                elif elem.class_name in DOOR_LABELS:
+                    m = extruder.extrude_bbox_door(elem.bbox)
+                    if m.vertex_count > 0:
+                        meshes.append(m)
+                        door_count += 1
+
+            print(f"  Bbox walls: {wall_count}  Bbox doors: {door_count}")
+
+            # Add non-wall/door polygons from vectorization (windows, rooms, etc.)
+            skip_labels = WALL_LABELS | DOOR_LABELS
+            for poly in geometry_result.vectorization.all_polygons:
+                if poly.class_name in skip_labels or len(poly.points) < 3:
+                    continue
+                mesh = extruder.extrude_polygon(poly.points, label=poly.class_name)
+                if mesh.vertex_count > 0:
+                    meshes.append(mesh)
+
+        else:
+            # ── Fallback: polygon-based extrusion (no raw detections) ─────
+            for poly in geometry_result.vectorization.all_polygons:
+                if len(poly.points) < 3:
+                    continue
+                mesh = extruder.extrude_polygon(poly.points, label=poly.class_name)
+                if mesh.vertex_count > 0:
+                    meshes.append(mesh)
 
         # Add floor slab from outer wall footprint
         if cfg.add_floor and geometry_result.vectorization.walls:
@@ -140,7 +199,8 @@ class ReconstructionPipeline:
             export_gltf=cfg.export_gltf,
             export_stl=cfg.export_stl,
         )
-        export_paths = exporter.export(building, out_dir, file_stem)
+        export_paths = exporter.export(building, out_dir, file_stem,
+                                       floorplan_image_path=floorplan_image_path)
 
         print(f"\nPhase 4 complete. Files saved to: {out_dir}/")
         for fmt, path in export_paths.items():

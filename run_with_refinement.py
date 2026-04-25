@@ -54,7 +54,7 @@ def main():
     print(f"\n📁 Input file: {input_file}")
     
     # Check if YOLO model exists
-    model_path = "src/segmentation/best.pt"
+    model_path = "models/best.pt"
     if not os.path.exists(model_path):
         print(f"\n❌ Error: YOLO model not found: {model_path}")
         print("Please train or download the YOLOv8 model first.")

@@ -29,15 +29,24 @@ import torch
 def get_best_device() -> str:
     """
     Returns the best available device string for PyTorch / Ultralytics.
-    Priority: MPS (Apple Silicon) > CUDA > CPU
+    Priority: MPS (Apple Silicon) > CUDA (if compatible) > CPU
     """
     if torch.backends.mps.is_available():
         print("Device: Apple Silicon MPS (GPU accelerated)")
         return "mps"
     elif torch.cuda.is_available():
-        gpu = torch.cuda.get_device_name(0)
-        print(f"Device: CUDA — {gpu}")
-        return "0"  # Ultralytics uses "0" for first CUDA device
+        # Check CUDA compute capability — RTX 5060 (sm_120) not supported by older PyTorch
+        major, minor = torch.cuda.get_device_capability(0)
+        sm = major * 10 + minor
+        supported = [50, 60, 61, 70, 75, 80, 86, 90]
+        if sm in supported:
+            gpu = torch.cuda.get_device_name(0)
+            print(f"Device: CUDA — {gpu}")
+            return "0"
+        else:
+            gpu = torch.cuda.get_device_name(0)
+            print(f"Device: CPU (GPU {gpu} sm_{sm} not supported by this PyTorch build)")
+            return "cpu"
     else:
         print("Device: CPU (training will be slow — consider Colab)")
         return "cpu"

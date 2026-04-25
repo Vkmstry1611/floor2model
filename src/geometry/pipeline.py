@@ -69,11 +69,12 @@ class GeometryConfig:
 @dataclass
 class GeometryResult:
     """Complete Phase 3 output for one floor plan."""
-    source_path:      str
-    vectorization:    VectorizationResult
-    scale:            ScaleEstimate
-    graph:            FloorPlanGraph
-    config:           GeometryConfig = field(repr=False)
+    source_path:         str
+    vectorization:       VectorizationResult
+    scale:               ScaleEstimate
+    graph:               FloorPlanGraph
+    config:              GeometryConfig = field(repr=False)
+    segmentation_result: object = field(default=None, repr=False)  # raw SegmentationResult
 
     def save(self, output_dir: str, prefix: str = "") -> dict[str, str]:
         """
@@ -244,6 +245,7 @@ class GeometryPipeline:
             scale=scale,
             graph=graph,
             config=self.config,
+            segmentation_result=segmentation_result,
         )
     
     def _create_debug_visualizations(

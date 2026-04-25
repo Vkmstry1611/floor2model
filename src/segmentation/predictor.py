@@ -43,23 +43,22 @@ class SegmentationResult:
     image_shape: tuple[int, int]             # (H, W)
     elements: list[DetectedElement] = field(default_factory=list)
 
-    # Convenience accessors by type
     @property
     def walls(self) -> list[DetectedElement]:
-        return [e for e in self.elements if e.class_id in (0, 1)]  # outer + inner
+        return [e for e in self.elements if 'wall' in e.class_name.lower()]
 
     @property
     def doors(self) -> list[DetectedElement]:
-        return [e for e in self.elements if e.class_id == 3]
+        return [e for e in self.elements if 'door' in e.class_name.lower()]
 
     @property
     def windows(self) -> list[DetectedElement]:
-        return [e for e in self.elements if e.class_id == 2]
+        return [e for e in self.elements if 'window' in e.class_name.lower()]
 
     @property
     def rooms(self) -> list[DetectedElement]:
-        room_ids = {6, 7, 8, 9, 10, 11}
-        return [e for e in self.elements if e.class_id in room_ids]
+        room_keywords = {'kitchen','living','bedroom','bathroom','corridor','balcony','garage','room'}
+        return [e for e in self.elements if any(k in e.class_name.lower() for k in room_keywords)]
 
     @property
     def summary(self) -> dict:
@@ -85,7 +84,7 @@ class FloorPlanPredictor:
         device:      Inference device ('mps', 'cpu', '0'). Auto-detected if None.
     """
 
-    # Class names matching the training dataset (0-indexed, background excluded)
+    # Class names — loaded dynamically from model, fallback below
     CLASS_NAMES = [
         "OuterWall", "InnerWall", "Window", "Door",
         "Stairs", "Railing", "Kitchen", "LivingRoom",
@@ -117,7 +116,10 @@ class FloorPlanPredictor:
 
             device = self.device or get_best_device()
             self._model = YOLO(str(self.model_path))
+            # Use model's own class names
+            self.CLASS_NAMES = list(self._model.names.values())
             print(f"Model loaded: {self.model_path.name} on {device}")
+            print(f"  Classes: {self.CLASS_NAMES}")
             self._device = device
 
     def predict(self, image_path: str) -> SegmentationResult:
@@ -153,7 +155,7 @@ class FloorPlanPredictor:
             image_shape=(h, w),
         )
 
-        if raw and raw[0].masks is not None:
+        if raw and len(raw[0].boxes) > 0:
             result.elements = self._parse_detections(raw[0], h, w)
 
         print(f"Detected {len(result.elements)} elements in {image_path.name}")
@@ -188,17 +190,20 @@ class FloorPlanPredictor:
             confidence = float(boxes.conf[i].item())
             x1, y1, x2, y2 = [int(v) for v in boxes.xyxy[i].tolist()]
 
-            # Get binary mask
+            # Get binary mask — from segmentation if available, else from bbox
             if masks is not None:
                 mask_data = masks.data[i].cpu().numpy()
-                # Resize mask to original image dimensions
                 mask = cv2.resize(
                     (mask_data * 255).astype(np.uint8),
                     (img_w, img_h),
                     interpolation=cv2.INTER_NEAREST,
                 )
             else:
-                mask = None
+                # Build mask from bounding box
+                mask = np.zeros((img_h, img_w), dtype=np.uint8)
+                x1c, y1c = max(0, x1), max(0, y1)
+                x2c, y2c = min(img_w, x2), min(img_h, y2)
+                mask[y1c:y2c, x1c:x2c] = 255
 
             # Extract polygon from mask
             polygon = self._mask_to_polygon(mask) if mask is not None else None

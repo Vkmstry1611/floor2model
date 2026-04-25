@@ -91,17 +91,17 @@ class SegmentationVisualizer:
         else:
             canvas = image.copy()
 
-        # Draw masks first (behind boxes and labels)
+        filtered = [e for e in result.elements if e.confidence >= min_confidence]
+
+        # Draw masks first (behind everything)
         if self.show_masks:
-            canvas = self._draw_masks(
-                canvas,
-                [e for e in result.elements if e.confidence >= min_confidence],
-            )
+            canvas = self._draw_masks(canvas, filtered)
+
+        # Draw contour outlines on top of masks
+        canvas = self._draw_outlines(canvas, filtered)
 
         # Draw boxes and labels on top
-        for elem in result.elements:
-            if elem.confidence < min_confidence:
-                continue
+        for elem in filtered:
             color = CLASS_COLORS.get(elem.class_name, DEFAULT_COLOR)
 
             if self.show_boxes:
@@ -149,6 +149,29 @@ class SegmentationVisualizer:
             color = CLASS_COLORS.get(elem.class_name, DEFAULT_COLOR)
             overlay[elem.mask > 0] = color
         return cv2.addWeighted(overlay, self.mask_alpha, canvas, 1 - self.mask_alpha, 0)
+
+    def _draw_outlines(
+        self, canvas: np.ndarray, elements: list[DetectedElement]
+    ) -> np.ndarray:
+        """Draw contour outlines around each detected element's mask."""
+        for elem in elements:
+            color = CLASS_COLORS.get(elem.class_name, DEFAULT_COLOR)
+            # Thicker outline for walls, thinner for rooms/icons
+            is_wall = "Wall" in elem.class_name
+            thickness = 3 if is_wall else 2
+
+            if elem.mask is not None:
+                contours, _ = cv2.findContours(
+                    elem.mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+                )
+                cv2.drawContours(canvas, contours, -1, color, thickness, cv2.LINE_AA)
+
+            elif elem.polygon:
+                pts = np.array(elem.polygon, dtype=np.int32).reshape((-1, 1, 2))
+                cv2.polylines(canvas, [pts], isClosed=True, color=color,
+                              thickness=thickness, lineType=cv2.LINE_AA)
+
+        return canvas
 
     def _draw_box(
         self, canvas: np.ndarray, elem: DetectedElement, color: tuple

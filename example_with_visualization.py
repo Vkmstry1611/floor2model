@@ -222,7 +222,7 @@ cleaned_image = prep_pipeline.run("samples/floorplan1.png")
 # Step 2: Segmentation
 from src.segmentation.predictor import FloorPlanPredictor
 
-predictor = FloorPlanPredictor("src/segmentation/best.pt")
+predictor = FloorPlanPredictor("models/best.pt")
 seg_result = predictor.predict(cleaned_image)
 
 # Step 3: Geometry with refinement and visualization
