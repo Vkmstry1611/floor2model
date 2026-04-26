@@ -59,7 +59,7 @@ class Extruder:
     }
 
     # Realistic wall thickness (metres)
-    WALL_THICKNESS_M = {"OuterWall": 0.25, "InnerWall": 0.15, "wall": 0.20}
+    WALL_THICKNESS_M = {"OuterWall": 0.15, "InnerWall": 0.10, "wall": 0.12}
     # Window sill height above floor (metres)
     WINDOW_SILL_M    = 0.9
     # Lintel thickness above door/window opening (metres)
