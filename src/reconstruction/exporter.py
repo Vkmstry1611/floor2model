@@ -37,6 +37,7 @@ class ModelExporter:
         output_dir: str,
         stem: str,
         floorplan_image_path: Optional[str] = None,
+        render_image_path: Optional[str] = None,
     ) -> Dict[str, str]:
         out = Path(output_dir)
         out.mkdir(parents=True, exist_ok=True)
@@ -44,10 +45,12 @@ class ModelExporter:
         paths: Dict[str, str] = {}
 
         if self.export_obj:
-            paths["obj"] = self._write_obj(building, out, stem, floorplan_image_path)
+            paths["obj"] = self._write_obj(building, out, stem,
+                                           floorplan_image_path, render_image_path)
 
         if self.export_gltf:
-            paths["gltf"] = self._write_gltf(building, out, stem, floorplan_image_path)
+            paths["gltf"] = self._write_gltf(building, out, stem,
+                                              floorplan_image_path, render_image_path)
 
         if self.export_stl:
             paths["stl"] = self._write_stl(building, out, stem)
@@ -94,7 +97,8 @@ class ModelExporter:
     # ── OBJ ──────────────────────────────────────────────────────────────────
 
     def _write_obj(self, building: Building3D, out: Path, stem: str,
-                   floorplan_image_path: Optional[str]) -> str:
+                   floorplan_image_path: Optional[str],
+                   render_image_path: Optional[str] = None) -> str:
         obj_path = out / f"{stem}.obj"
         mtl_path = out / f"{stem}.mtl"
 
@@ -104,6 +108,14 @@ class ModelExporter:
             import shutil
             tex_filename = f"{stem}_floorplan.png"
             shutil.copy2(floorplan_image_path, out / tex_filename)
+
+        # Copy render image next to OBJ if provided
+        render_filename = None
+        if render_image_path and Path(render_image_path).exists():
+            import shutil
+            render_filename = f"{stem}_render.png"
+            if not (out / render_filename).exists():
+                shutil.copy2(render_image_path, out / render_filename)
 
         # Collect materials
         materials: Dict[str, tuple] = {}
@@ -118,6 +130,10 @@ class ModelExporter:
                 f.write("newmtl FloorPlan\n")
                 f.write(f"map_Kd {tex_filename}\n")
                 f.write("Kd 1.0 1.0 1.0\nKa 1.0 1.0 1.0\nKs 0.0 0.0 0.0\nd 1.0\n\n")
+            if render_filename:
+                f.write("newmtl InteriorRender\n")
+                f.write(f"map_Kd {render_filename}\n")
+                f.write("Kd 1.0 1.0 1.0\nKa 1.0 1.0 1.0\nKs 0.1 0.1 0.1\nd 1.0\n\n")
             for mat_name, color in materials.items():
                 r, g, b = color
                 f.write(f"newmtl {mat_name}\n")
@@ -129,17 +145,17 @@ class ModelExporter:
 
             v_offset = 1
 
-            # Ground plane with texture
+            # Ground plane — use render texture if available, else floorplan
             gp = self._ground_plane_vertices(building)
             if gp is not None:
                 f.write("o FloorPlan\n")
-                if tex_filename:
+                if render_filename:
+                    f.write("usemtl InteriorRender\n")
+                elif tex_filename:
                     f.write("usemtl FloorPlan\n")
                 for v in gp:
                     f.write(f"v {v[0]:.6f} {v[2]:.6f} {-v[1]:.6f}\n")
-                # UV coords
                 f.write("vt 0.0 0.0\nvt 1.0 0.0\nvt 1.0 1.0\nvt 0.0 1.0\n")
-                # Two triangles for the quad
                 o = v_offset
                 f.write(f"f {o}/1 {o+1}/2 {o+2}/3\n")
                 f.write(f"f {o}/1 {o+2}/3 {o+3}/4\n\n")
@@ -166,7 +182,8 @@ class ModelExporter:
     # ── glTF 2.0 ─────────────────────────────────────────────────────────────
 
     def _write_gltf(self, building: Building3D, out: Path, stem: str,
-                    floorplan_image_path: Optional[str]) -> str:
+                    floorplan_image_path: Optional[str],
+                    render_image_path: Optional[str] = None) -> str:
         gltf_path = out / f"{stem}.gltf"
 
         def pad4(b: bytes) -> bytes:
@@ -207,32 +224,36 @@ class ModelExporter:
         tex_mat_idx = None
 
         if gp is not None:
+            # Prefer render image for the floor — it shows the interior
+            floor_img_path = render_image_path or floorplan_image_path
             img_b64 = None
-            if floorplan_image_path:
-                img_b64 = self._load_image_as_png_b64(floorplan_image_path)
+            if floor_img_path:
+                img_b64 = self._load_image_as_png_b64(floor_img_path)
+
+            # Also load floorplan separately for a ceiling plane if render exists
+            fp_b64 = None
+            if render_image_path and floorplan_image_path:
+                fp_b64 = self._load_image_as_png_b64(floorplan_image_path)
 
             if img_b64:
-                # Add image, texture, material
                 images.append({"uri": f"data:image/png;base64,{img_b64}"})
                 textures.append({"source": 0})
                 materials.append({
-                    "name": "FloorPlan",
+                    "name": "InteriorFloor",
                     "pbrMetallicRoughness": {
                         "baseColorTexture": {"index": 0},
                         "metallicFactor": 0.0,
-                        "roughnessFactor": 1.0,
+                        "roughnessFactor": 0.8,
                     },
                     "doubleSided": True,
                 })
                 tex_mat_idx = 0
                 has_texture = True
 
-            # Ground plane vertices (4 corners)
+            # Ground plane vertices (4 corners) — render texture on floor
             gp_verts = gp.astype(np.float32)
-            # UV coords: (0,0) (1,0) (1,1) (0,1)
-            gp_uvs = np.array([[0,0],[1,0],[1,1],[0,1]], dtype=np.float32)
-            # Two triangles
-            gp_idx = np.array([0,1,2, 0,2,3], dtype=np.uint32)
+            gp_uvs   = np.array([[0,0],[1,0],[1,1],[0,1]], dtype=np.float32)
+            gp_idx   = np.array([0,1,2, 0,2,3], dtype=np.uint32)
 
             bv_gp_v  = add_buffer(gp_verts.tobytes(), 34962)
             bv_gp_uv = add_buffer(gp_uvs.tobytes(), 34962)
@@ -251,8 +272,53 @@ class ModelExporter:
             if tex_mat_idx is not None:
                 gp_prim["material"] = tex_mat_idx
 
-            meshes.append({"name": "FloorPlan", "primitives": [gp_prim]})
-            nodes.append({"mesh": len(meshes) - 1, "name": "FloorPlan"})
+            meshes.append({"name": "InteriorFloor", "primitives": [gp_prim]})
+            nodes.append({"mesh": len(meshes) - 1, "name": "InteriorFloor"})
+
+            # ── Ceiling plane with floorplan texture (top-down view) ──────
+            # Placed at wall height so you can see the floorplan from above
+            if fp_b64:
+                images.append({"uri": f"data:image/png;base64,{fp_b64}"})
+                fp_tex_idx = len(textures)
+                textures.append({"source": len(images) - 1})
+                fp_mat_idx = len(materials)
+                materials.append({
+                    "name": "FloorPlan",
+                    "pbrMetallicRoughness": {
+                        "baseColorTexture": {"index": fp_tex_idx},
+                        "metallicFactor": 0.0,
+                        "roughnessFactor": 1.0,
+                    },
+                    "doubleSided": True,
+                })
+                # Ceiling quad at wall_height + small offset
+                ceil_z = building.wall_height + 0.05
+                ceil_verts = np.array([
+                    [gp[0,0], gp[0,1], ceil_z],
+                    [gp[1,0], gp[1,1], ceil_z],
+                    [gp[2,0], gp[2,1], ceil_z],
+                    [gp[3,0], gp[3,1], ceil_z],
+                ], dtype=np.float32)
+                ceil_uvs = np.array([[0,1],[1,1],[1,0],[0,0]], dtype=np.float32)
+                ceil_idx = np.array([0,2,1, 0,3,2], dtype=np.uint32)  # flipped winding
+
+                bv_cv  = add_buffer(ceil_verts.tobytes(), 34962)
+                bv_cuv = add_buffer(ceil_uvs.tobytes(), 34962)
+                bv_ci  = add_buffer(ceil_idx.tobytes(), 34963)
+
+                acc_cv  = add_accessor(bv_cv,  5126, 4, "VEC3",
+                                       ceil_verts.min(0).tolist(), ceil_verts.max(0).tolist())
+                acc_cuv = add_accessor(bv_cuv, 5126, 4, "VEC2")
+                acc_ci  = add_accessor(bv_ci,  5125, 6, "SCALAR")
+
+                ceil_prim = {
+                    "attributes": {"POSITION": acc_cv, "TEXCOORD_0": acc_cuv},
+                    "indices": acc_ci,
+                    "mode": 4,
+                    "material": fp_mat_idx,
+                }
+                meshes.append({"name": "FloorPlan", "primitives": [ceil_prim]})
+                nodes.append({"mesh": len(meshes) - 1, "name": "FloorPlan"})
 
         # ── 3D geometry mesh ──────────────────────────────────────────────
         vertices = building.merged_vertices

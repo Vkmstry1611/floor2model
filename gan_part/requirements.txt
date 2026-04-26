@@ -1,0 +1,21 @@
+# Core ML
+torch>=2.0.0
+torchvision>=0.15.0
+numpy>=1.23.0,<2.0.0
+
+# Image Processing
+opencv-python-headless
+pillow
+scipy
+
+# Generative Models
+diffusers
+transformers
+accelerate
+
+# UI
+gradio
+
+# Utils
+tqdm
+matplotlib

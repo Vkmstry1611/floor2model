@@ -77,6 +77,7 @@ class ReconstructionPipeline:
         output_dir: Optional[str] = None,
         stem: Optional[str] = None,
         floorplan_image_path: Optional[str] = None,
+        render_image_path: Optional[str] = None,
     ) -> Model3D:
         """
         Run the full Phase 4 pipeline.
@@ -125,40 +126,105 @@ class ReconstructionPipeline:
 
         meshes: list[Mesh3D] = []
 
-        WALL_LABELS = {"OuterWall", "InnerWall", "wall"}
-        DOOR_LABELS = {"Door", "door"}
+        WALL_LABELS   = {"OuterWall", "InnerWall", "wall"}
+        DOOR_LABELS   = {"Door", "door"}
+        WINDOW_LABELS = {"Window", "window"}
 
         seg = getattr(geometry_result, "segmentation_result", None)
         has_raw_detections = seg is not None and len(seg.elements) > 0
 
         if has_raw_detections:
-            # ── Primary path: bbox-based extrusion ────────────────────────
-            # When raw detections exist, generate walls and doors ONLY from
-            # their bounding boxes — no polygon duplicates.
-            # Non-wall/door polygons (windows, rooms) still come from masks.
-            wall_count = door_count = 0
-            for elem in seg.elements:
-                if elem.class_name in WALL_LABELS:
-                    m = extruder.extrude_bbox_wall(elem.bbox, label=elem.class_name)
+            # Separate elements by type
+            wall_elems   = [e for e in seg.elements if e.class_name in WALL_LABELS]
+            door_elems   = [e for e in seg.elements if e.class_name in DOOR_LABELS]
+            window_elems = [e for e in seg.elements if e.class_name in WINDOW_LABELS]
+
+            # ── Match openings to walls ───────────────────────────────────
+            # For each door/window, find the wall whose bbox it overlaps most.
+            # An opening overlaps a wall if their bboxes intersect.
+            def _bbox_overlap(a, b):
+                """Return True if bboxes (x1,y1,x2,y2) overlap."""
+                ax1,ay1,ax2,ay2 = a
+                bx1,by1,bx2,by2 = b
+                return ax1 < bx2 and ax2 > bx1 and ay1 < by2 and ay2 > by1
+
+            def _overlap_area(a, b):
+                ax1,ay1,ax2,ay2 = a
+                bx1,by1,bx2,by2 = b
+                ix = max(0, min(ax2,bx2) - max(ax1,bx1))
+                iy = max(0, min(ay2,by2) - max(ay1,by1))
+                return ix * iy
+
+            # wall_idx → list of opening dicts
+            wall_openings = {i: [] for i in range(len(wall_elems))}
+            assigned_doors   = set()
+            assigned_windows = set()
+
+            for oi, op_elem in enumerate(door_elems + window_elems):
+                otype = "door" if op_elem.class_name in DOOR_LABELS else "window"
+                best_wall, best_area = -1, 0
+                for wi, w in enumerate(wall_elems):
+                    if _bbox_overlap(w.bbox, op_elem.bbox):
+                        a = _overlap_area(w.bbox, op_elem.bbox)
+                        if a > best_area:
+                            best_area, best_wall = a, wi
+                if best_wall >= 0:
+                    wall_openings[best_wall].append(
+                        {"bbox": op_elem.bbox, "type": otype}
+                    )
+                    if otype == "door":
+                        assigned_doors.add(oi)
+                    else:
+                        assigned_windows.add(oi - len(door_elems))
+
+            # ── Extrude walls (with openings cut in) ─────────────────────
+            wall_count = door_count = window_count = 0
+            for wi, w_elem in enumerate(wall_elems):
+                ops = wall_openings[wi]
+                if ops:
+                    pieces = extruder.build_wall_with_openings(
+                        w_elem.bbox, ops, label=w_elem.class_name
+                    )
+                    meshes.extend(pieces)
+                    door_count   += sum(1 for o in ops if o["type"] == "door")
+                    window_count += sum(1 for o in ops if o["type"] == "window")
+                else:
+                    m = extruder.extrude_bbox_wall(
+                        w_elem.bbox, label=w_elem.class_name
+                    )
                     if m.vertex_count > 0:
                         meshes.append(m)
-                        wall_count += 1
-                elif elem.class_name in DOOR_LABELS:
-                    m = extruder.extrude_bbox_door(elem.bbox)
+                wall_count += 1
+
+            # ── Unassigned doors (not overlapping any wall) ───────────────
+            for oi, d_elem in enumerate(door_elems):
+                if oi not in assigned_doors:
+                    # Standalone door — simple panel at floor level
+                    m = extruder.extrude_bbox_wall(
+                        d_elem.bbox, label="door"
+                    )
                     if m.vertex_count > 0:
                         meshes.append(m)
-                        door_count += 1
+                    door_count += 1
 
-            print(f"  Bbox walls: {wall_count}  Bbox doors: {door_count}")
+            # ── Unassigned windows (not overlapping any wall) ─────────────
+            for oi, w_elem in enumerate(window_elems):
+                if oi not in assigned_windows:
+                    m = extruder.extrude_standalone_window(w_elem.bbox)
+                    if m.vertex_count > 0:
+                        meshes.append(m)
+                    window_count += 1
 
-            # Add non-wall/door polygons from vectorization (windows, rooms, etc.)
-            skip_labels = WALL_LABELS | DOOR_LABELS
+            print(f"  Walls: {wall_count}  Doors: {door_count}  Windows: {window_count}")
+
+            # Non-wall/door/window polygons from vectorization (rooms etc.)
+            skip_labels = WALL_LABELS | DOOR_LABELS | WINDOW_LABELS
             for poly in geometry_result.vectorization.all_polygons:
                 if poly.class_name in skip_labels or len(poly.points) < 3:
                     continue
-                mesh = extruder.extrude_polygon(poly.points, label=poly.class_name)
-                if mesh.vertex_count > 0:
-                    meshes.append(mesh)
+                m = extruder.extrude_polygon(poly.points, label=poly.class_name)
+                if m.vertex_count > 0:
+                    meshes.append(m)
 
         else:
             # ── Fallback: polygon-based extrusion (no raw detections) ─────
@@ -200,7 +266,8 @@ class ReconstructionPipeline:
             export_stl=cfg.export_stl,
         )
         export_paths = exporter.export(building, out_dir, file_stem,
-                                       floorplan_image_path=floorplan_image_path)
+                                       floorplan_image_path=floorplan_image_path,
+                                       render_image_path=render_image_path)
 
         print(f"\nPhase 4 complete. Files saved to: {out_dir}/")
         for fmt, path in export_paths.items():

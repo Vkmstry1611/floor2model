@@ -7,8 +7,15 @@ Ka 1.0 1.0 1.0
 Ks 0.0 0.0 0.0
 d 1.0
 
+newmtl InteriorRender
+map_Kd floorplan2_render.png
+Kd 1.0 1.0 1.0
+Ka 1.0 1.0 1.0
+Ks 0.1 0.1 0.1
+d 1.0
+
 newmtl wall
-Kd 0.7000 0.7000 0.7000
+Kd 0.3500 0.3500 0.4500
 Ka 0.1 0.1 0.1
 Ks 0.0 0.0 0.0
 d 1.0
