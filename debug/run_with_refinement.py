@@ -10,7 +10,7 @@ This script demonstrates the full workflow:
 
 Usage:
     python3 run_with_refinement.py
-    python3 run_with_refinement.py samples/18_png.rf.4956b6043e9f9f738808088cfe37243d.jpg
+    python3 run_with_refinement.py samples/floorplan2.png
 """
 
 import sys
@@ -38,7 +38,7 @@ def main():
     if len(sys.argv) > 1:
         input_file = sys.argv[1]
     else:
-        input_file = "samples/18_png.rf.4956b6043e9f9f738808088cfe37243d.jpg"
+        input_file = "samples/floorplan1.png"
     
     # Check if input file exists
     if not os.path.exists(input_file):

@@ -1,128 +1,124 @@
 """
 main.py
 -------
-Combined pipeline — runs CV then GAN on all images in samples/.
+Full pipeline — CV + GAN combined.
 
-  Step 1 (CV):  Detect walls/doors/windows → 3D building model (.gltf)
-  Step 2 (GAN): Apply textures + furniture → interior model (_interior.gltf)
+Runs cv_pipeline.py then gan_pipeline.py on all images in samples/.
 
 Usage:
-    python main.py              # run both CV + GAN
-    python main.py --cv-only    # run CV pipeline only
-    python main.py --gan-only   # run GAN on existing CV outputs
+    python main.py                    # process all images in samples/
+    python main.py samples/plan.png   # single image
 
-Outputs:
-    generated_models/<stem>/    ← CV outputs (.gltf, .obj, detections)
-    gan_output/<stem>/          ← GAN outputs (_interior.gltf)
+Pipeline:
+    samples/<image>
+        ↓  cv_pipeline.py
+    generated_models/<stem>/
+        <stem>_detections.png   — YOLO detection overlay
+        <stem>.gltf             — 3D building (walls/doors/windows)
+        <stem>.obj
+        ↓  gan_pipeline.py
+    gan_output/<stem>/
+        <stem>_interior.gltf    — 3D building + GAN textures + furniture
 """
+
+from __future__ import annotations
 
 import sys
 import os
-import argparse
+import importlib.util
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 os.chdir(PROJECT_ROOT)
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from cv_pipeline import run_cv_pipeline, collect_samples
-from gan_part.gan_runner import process_floorplan as run_gan_pipeline
+
+def _load(name: str) -> object:
+    """Load a pipeline module by filename from the project root."""
+    spec = importlib.util.spec_from_file_location(
+        name, str(PROJECT_ROOT / f"{name}.py")
+    )
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_cv  = _load("cv_pipeline")
+_gan = _load("gan_pipeline")
+
+collect_samples = _cv.collect_samples
+run_cv          = _cv.run_cv
+SAMPLES_DIR     = _cv.SAMPLES_DIR
+IMAGE_EXTS      = _cv.IMAGE_EXTS
+run_gan         = _gan.run_gan
+GAN_AVAILABLE   = _gan.GAN_AVAILABLE
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Floor2Model — CV + GAN pipeline"
-    )
-    parser.add_argument(
-        "--cv-only",  action="store_true",
-        help="Run CV pipeline only (no GAN textures/furniture)"
-    )
-    parser.add_argument(
-        "--gan-only", action="store_true",
-        help="Run GAN pipeline only on existing CV outputs"
-    )
-    args = parser.parse_args()
+    # ── Collect input images ──────────────────────────────────────────────────
+    if len(sys.argv) > 1:
+        input_path = Path(sys.argv[1])
+        if not input_path.exists():
+            print(f"❌ Path not found: {input_path}")
+            sys.exit(1)
+        images = collect_samples(input_path)
+    else:
+        images = collect_samples()
 
-    run_cv  = not args.gan_only
-    run_gan = not args.cv_only
-
-    samples = collect_samples()
-    if not samples:
-        print("❌ No image files found in samples/")
+    if not images:
+        print(f"❌ No images found in {SAMPLES_DIR}")
         sys.exit(1)
 
-    print(f"\nFloor2Model Pipeline")
     print(f"{'='*60}")
-    print(f"Images:   {len(samples)} in samples/")
-    print(f"CV:       {'✓' if run_cv  else '—'}")
-    print(f"GAN:      {'✓' if run_gan else '—'}")
-    print(f"{'='*60}\n")
+    print(f"Floor2Model — Full Pipeline")
+    print(f"{'='*60}")
+    print(f"Found {len(images)} image(s): {[i.name for i in images]}")
+    print(f"GAN available: {GAN_AVAILABLE}\n")
 
-    cv_results  = {}   # stem → cv result dict
-    gan_results = []
+    cv_results  = []   # stems that CV succeeded on
+    gan_results = []   # stems that GAN succeeded on
 
-    # ── Step 1: CV pipeline ───────────────────────────────────────────────────
-    if run_cv:
-        print("STEP 1 — CV Pipeline")
-        print("─" * 60)
-        for sample in samples:
-            result = run_cv_pipeline(sample)
+    # ── Phase 1: CV pipeline for all images ───────────────────────────────────
+    print(f"\n{'─'*60}")
+    print("STAGE 1 — CV Pipeline (detection + geometry + 3D model)")
+    print(f"{'─'*60}")
+
+    for img in images:
+        out_dir = run_cv(img)
+        if out_dir:
+            cv_results.append(img.stem)
+
+    print(f"\n✓ CV complete: {len(cv_results)}/{len(images)} succeeded")
+
+    if not cv_results:
+        print("❌ No CV outputs — cannot run GAN pipeline.")
+        sys.exit(1)
+
+    # ── Phase 2: GAN pipeline for all successful CV outputs ───────────────────
+    if not GAN_AVAILABLE:
+        print("\n⚠ GAN pipeline skipped — dependencies not installed.")
+        print("  Run: pip install -r gan_part/requirements.txt")
+    else:
+        print(f"\n{'─'*60}")
+        print("STAGE 2 — GAN Pipeline (textures + furniture)")
+        print(f"{'─'*60}")
+
+        for stem in cv_results:
+            result = run_gan(stem)
             if result:
-                cv_results[result["stem"]] = result
+                gan_results.append(stem)
 
-        print(f"\n✓ CV complete — {len(cv_results)}/{len(samples)} processed")
-        print(f"  Output: generated_models/\n")
-
-    # ── Step 2: GAN pipeline ──────────────────────────────────────────────────
-    if run_gan:
-        print("STEP 2 — GAN Pipeline")
-        print("─" * 60)
-
-        if run_cv and cv_results:
-            # Called right after CV — pass seg_result directly (no re-detection)
-            for stem, cv_data in cv_results.items():
-                result = run_gan_pipeline(
-                    stem=stem,
-                    seg_result=cv_data["seg_result"],
-                    image_path=cv_data["image_path"],
-                )
-                if result:
-                    gan_results.append(result)
-        else:
-            # Standalone GAN — read from generated_models/
-            generated = PROJECT_ROOT / "generated_models"
-            stems = sorted(
-                d.name for d in generated.iterdir()
-                if d.is_dir() and (d / f"{d.name}.gltf").exists()
-            ) if generated.exists() else []
-
-            if not stems:
-                print("❌ No CV outputs found. Run without --gan-only first.")
-                sys.exit(1)
-
-            for stem in stems:
-                # Find matching sample image
-                img_path = None
-                for ext in (".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif"):
-                    candidate = PROJECT_ROOT / "samples" / f"{stem}{ext}"
-                    if candidate.exists():
-                        img_path = candidate
-                        break
-                result = run_gan_pipeline(stem=stem, image_path=img_path)
-                if result:
-                    gan_results.append(result)
-
-        print(f"\n✓ GAN complete — {len(gan_results)} processed")
-        print(f"  Output: gan_output/")
+        print(f"\n✓ GAN complete: {len(gan_results)}/{len(cv_results)} succeeded")
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
-    print("✓ All done")
-    if run_cv:
-        print(f"  CV models:       generated_models/")
-    if run_gan:
-        print(f"  Interior models: gan_output/")
-        print(f"  View:            https://gltf-viewer.donmccurdy.com")
+    print("PIPELINE COMPLETE")
+    print(f"{'='*60}")
+    print(f"  CV outputs  → generated_models/   ({len(cv_results)} floorplans)")
+    if GAN_AVAILABLE:
+        print(f"  GAN outputs → gan_output/          ({len(gan_results)} floorplans)")
+    print(f"\n  View 3D models: https://gltf-viewer.donmccurdy.com")
+    print(f"    Drag any .gltf file from generated_models/ or gan_output/")
     print(f"{'='*60}")
 
 

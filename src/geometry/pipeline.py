@@ -227,9 +227,7 @@ class GeometryPipeline:
 
         # ── Step 2: Estimate scale ─────────────────────────────────────────
         print("[2/3] Estimating scale...")
-        scale = self.scale_estimator.estimate(
-            image, vec_result, segmentation_result
-        )
+        scale = self.scale_estimator.estimate(image, vec_result)
         print(f"  {scale.pixels_per_metre:.1f} px/m "
               f"(method: {scale.method}, "
               f"confidence: {scale.confidence:.0%})")

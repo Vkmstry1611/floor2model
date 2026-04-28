@@ -75,19 +75,13 @@ def apply_textures(
     cv_gltf_path: str,
     texture_generator,
     output_path: str,
-    image_path: Optional[str] = None,
 ) -> str:
     """
     Read CV .gltf, apply GAN-generated textures to wall/floor/door/window
-    faces, add OCR-guided furniture, write new _interior.gltf.
-    - Removes floorplan image planes from CV output
-    - Crops top-view texture to actual wall extents
-    - Uses OCR to detect room labels for furniture placement
+    faces, add furniture, write new _interior.gltf.
+    Removes the floorplan image planes from the CV output.
     """
-    from gan_part.inference.furniture_placer import place_furniture
-    from gan_part.inference.ocr_room_detector import (
-        detect_rooms_ocr, match_rooms_to_footprint
-    )
+    from gan_part.inference.furniture_placer import place_furniture_in_rooms
 
     print(f"  Reading CV model: {Path(cv_gltf_path).name}")
     gltf = json.loads(Path(cv_gltf_path).read_text())
@@ -207,49 +201,19 @@ def apply_textures(
     y_min = float(vertices[:, 1].min())
     y_max = float(vertices[:, 1].max())
 
-    # ── Crop floorplan image to wall extents for top-view texture ─────────────
-    # The floorplan image has margins/whitespace. We crop it to match
-    # the actual wall bounding box so the texture aligns with the 3D model.
-    def _load_cropped_floorplan(fp_path: str) -> Optional[str]:
-        """Load floorplan, crop to wall extents, return as base64 PNG."""
-        try:
-            import cv2 as _cv2
-            img = _cv2.imread(fp_path)
-            if img is None:
-                return None
-            H, W = img.shape[:2]
-            # Crop to central 90% to remove margins
-            margin_x = int(W * 0.05)
-            margin_y = int(H * 0.05)
-            cropped = img[margin_y:H-margin_y, margin_x:W-margin_x]
-            # Flip for glTF UV convention
-            cropped = _cv2.flip(cropped, 0)
-            ok, buf = _cv2.imencode(".png", cropped)
-            if not ok:
-                return None
-            return base64.b64encode(buf.tobytes()).decode("ascii")
-        except Exception:
-            return None
-
-    # ── Floor plane — use cropped floorplan as top-view texture ──────────────
-    # The floorplan image IS the top view — use it directly on the floor
-    # so when you look down you see the actual floorplan layout.
+    # ── Floor plane with proper top-down wood texture ─────────────────────────
+    # NOTE: No floorplan image — just the GAN-generated floor texture
     floor_verts = np.array([
         [x_min, y_min, 0.005],
         [x_max, y_min, 0.005],
         [x_max, y_max, 0.005],
         [x_min, y_max, 0.005],
     ], dtype=np.float32)
-    floor_uvs = np.array([[0,0],[1,0],[1,1],[0,1]], dtype=np.float32)
+    # Tile the texture: repeat 4x across the floor for realistic scale
+    floor_uvs = np.array([[0,0],[4,0],[4,4],[0,4]], dtype=np.float32)
     floor_idx = np.array([0,1,2, 0,2,3], dtype=np.uint32)
 
-    # Try cropped floorplan first, fall back to GAN floor texture
-    fp_path = image_path  # the original floorplan image
-    floor_b64 = None
-    if fp_path and Path(fp_path).exists():
-        floor_b64 = _load_cropped_floorplan(fp_path)
-    if floor_b64 is None:
-        floor_b64 = _img_to_b64(tex_images["floor"])
+    floor_b64 = _img_to_b64(tex_images["floor"])
     new_images.append({"uri": f"data:image/png;base64,{floor_b64}"})
     new_textures.append({"source": len(new_images) - 1})
     floor_mat_idx = len(new_materials)
@@ -306,28 +270,15 @@ def apply_textures(
                     0.70 if surf == "door"    else \
                     0.20 if surf == "window"  else 0.90
 
-        # Window: semi-transparent glass
-        if surf == "window":
-            new_materials.append({
-                "name": "WindowGlass",
-                "pbrMetallicRoughness": {
-                    "baseColorFactor": [0.75, 0.88, 0.98, 0.35],  # RGBA — 35% opacity
-                    "metallicFactor":  0.0,
-                    "roughnessFactor": 0.05,
-                },
-                "alphaMode":   "BLEND",
-                "doubleSided": True,
-            })
-        else:
-            new_materials.append({
-                "name": f"{surf.capitalize()}Texture",
-                "pbrMetallicRoughness": {
-                    "baseColorTexture": {"index": len(new_textures) - 1},
-                    "metallicFactor": 0.0,
-                    "roughnessFactor": roughness,
-                },
-                "doubleSided": True,
-            })
+        new_materials.append({
+            "name": f"{surf.capitalize()}Texture",
+            "pbrMetallicRoughness": {
+                "baseColorTexture": {"index": len(new_textures) - 1},
+                "metallicFactor": 0.05 if surf == "window" else 0.0,
+                "roughnessFactor": roughness,
+            },
+            "doubleSided": True,
+        })
 
         bv_v  = add_buf(sub_verts.astype(np.float32).tobytes(), 34962)
         bv_uv = add_buf(sub_uvs.astype(np.float32).tobytes(), 34962)
@@ -350,47 +301,11 @@ def apply_textures(
                           "name": f"{surf.capitalize()}Mesh"})
         print(f"  Added {surf} mesh: {len(sub_verts)} verts, {len(sub_tris)} tris")
 
-    # ── OCR room detection ────────────────────────────────────────────────────
-    ocr_rooms = []
-    if image_path and Path(image_path).exists():
-        print("\n  Running OCR room detection...")
-        raw_rooms = detect_rooms_ocr(image_path)
-        if raw_rooms:
-            # Get wall extents in pixels from the segmentation
-            # We need to read the original image to get pixel coords
-            import cv2 as _cv2
-            _img = _cv2.imread(image_path)
-            _H, _W = _img.shape[:2] if _img is not None else (640, 452)
-
-            # Estimate wall extents from the 3D model footprint
-            # (reverse the px_to_metres transform)
-            # We know: x_m = (px - origin_x) / ppm, y_m = -(py - origin_y) / ppm
-            # So: px = x_m * ppm + origin_x
-            # We don't have ppm here, but we can estimate from footprint vs image
-            ppm_est = max(_W, _H) / max(
-                x_max - x_min + 0.001,
-                y_max - y_min + 0.001
-            )
-            # Wall extents in pixels (approximate)
-            wall_x1_px = int(_W * 0.05)
-            wall_y1_px = int(_H * 0.05)
-            wall_x2_px = int(_W * 0.95)
-            wall_y2_px = int(_H * 0.95)
-
-            ocr_rooms = match_rooms_to_footprint(
-                raw_rooms,
-                _W, _H,
-                wall_x1_px, wall_y1_px, wall_x2_px, wall_y2_px,
-                x_min, x_max, y_min, y_max,
-            )
-            print(f"  OCR matched {len(ocr_rooms)} rooms to 3D footprint")
-            for r in ocr_rooms:
-                print(f"    {r['label']} at ({r['x']:.2f}, {r['y']:.2f})m — '{r['text']}'")
-
     # ── Furniture ─────────────────────────────────────────────────────────────
     print("\n  Placing furniture...")
-    furniture_items = place_furniture(x_min, x_max, y_min, y_max,
-                                      ocr_rooms=ocr_rooms if ocr_rooms else None)
+    from gan_part.inference.furniture_placer import place_furniture_in_rooms
+    stem = Path(output_path).stem.replace("_interior", "")
+    furniture_items = place_furniture_in_rooms(vertices, colors, tris, stem=stem)
     print(f"  {len(furniture_items)} furniture pieces")
 
     for fi, item in enumerate(furniture_items):

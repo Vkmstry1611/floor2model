@@ -217,7 +217,7 @@ def example_6_complete_workflow():
 from src.preprocessing.pipeline import PreprocessingPipeline
 
 prep_pipeline = PreprocessingPipeline()
-cleaned_image = prep_pipeline.run("samples/18_png.rf.4956b6043e9f9f738808088cfe37243d.jpg")
+cleaned_image = prep_pipeline.run("samples/floorplan1.png")
 
 # Step 2: Segmentation
 from src.segmentation.predictor import FloorPlanPredictor
@@ -246,7 +246,7 @@ geo_config = GeometryConfig(
 )
 
 geo_pipeline = GeometryPipeline(config=geo_config)
-geo_result = geo_pipeline.run(seg_result, cleaned_image, "samples/18_png.rf.4956b6043e9f9f738808088cfe37243d.jpg")
+geo_result = geo_pipeline.run(seg_result, cleaned_image, "floorplan1.png")
 
 # Visualizations are automatically saved to outputs/debug_viz/
 # - floorplan1_before_refinement.png

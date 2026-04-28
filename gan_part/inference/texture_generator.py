@@ -1,143 +1,201 @@
 """
 texture_generator.py
 --------------------
-Generates realistic texture images for each surface type.
+Generates realistic texture images for each surface type
+using ControlNet (or Pix2Pix GAN when trained).
 
-Uses a pretrained Pix2Pix GAN from HuggingFace (huggan/pix2pix-facades).
-Pix2Pix is a conditional GAN (Generator + PatchGAN Discriminator) —
-the same architecture as the model being trained on Kaggle.
-
-Fallback: procedural textures if the GAN is unavailable.
+For each surface type (wall, floor, door, window) it produces
+a tileable 512x512 texture image that gets applied to the
+corresponding faces in the 3D model.
 """
 
 from __future__ import annotations
 
-import os
 import numpy as np
-from PIL import Image, ImageFilter, ImageDraw
+from PIL import Image
 from typing import Optional
 
-os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
+# ── Prompts per surface type ──────────────────────────────────────────────────
 
-# ── Surface → color for seg map input ────────────────────────────────────────
-# These are the colors the Pix2Pix model was trained to recognize
-SURFACE_COLORS = {
-    "wall":    (174, 199, 232),   # light blue — architectural wall
-    "floor":   (152, 223, 138),   # light green — floor
-    "door":    (255, 152, 150),   # salmon — door/opening
-    "window":  (197, 176, 213),   # lavender — window
-    "ceiling": (247, 182, 210),   # pink — ceiling
+SURFACE_PROMPTS = {
+    "wall": (
+        "seamless tileable white plaster wall texture, smooth surface, "
+        "architectural interior, high quality, 4k, no furniture, flat surface"
+    ),
+    "floor": (
+        "seamless tileable light oak hardwood floor texture, top down view, "
+        "architectural interior, high quality, 4k, flat surface"
+    ),
+    "door": (
+        "seamless tileable wooden door texture, light oak wood grain, "
+        "architectural interior, high quality, 4k, flat surface"
+    ),
+    "window": (
+        "seamless tileable frosted glass texture, translucent, "
+        "architectural interior, high quality, 4k, flat surface"
+    ),
+    "ceiling": (
+        "seamless tileable white ceiling plaster texture, smooth, "
+        "architectural interior, high quality, 4k, flat surface"
+    ),
 }
+
+NEGATIVE_PROMPT = (
+    "cartoon, anime, blurry, low quality, distorted, furniture, "
+    "people, shadows, perspective, 3d render, photorealistic room"
+)
 
 
 class TextureGenerator:
     """
-    Generates surface textures using a pretrained Pix2Pix GAN.
-    Falls back to procedural textures if unavailable.
+    Generates surface textures using ControlNet conditioned on
+    a solid-color segmentation patch.
+
+    Falls back to procedural textures if ControlNet is unavailable.
     """
 
     def __init__(self, device: str = "cpu"):
-        self.device  = device
-        self._pipe   = None
-        self._backend = None   # "pix2pix" | "procedural"
+        self.device = device
+        self._pipe = None
 
     def _load(self):
-        if self._backend is not None:
+        if self._pipe is not None:
             return
         try:
-            self._load_pix2pix()
+            import torch
+            from diffusers import (
+                StableDiffusionControlNetPipeline,
+                ControlNetModel,
+                UniPCMultistepScheduler,
+            )
+            print("  Loading ControlNet for texture generation...")
+            controlnet = ControlNetModel.from_pretrained(
+                "lllyasviel/sd-controlnet-seg",
+                torch_dtype=torch.float32,
+            )
+            pipe = StableDiffusionControlNetPipeline.from_pretrained(
+                "runwayml/stable-diffusion-v1-5",
+                controlnet=controlnet,
+                torch_dtype=torch.float32,
+            )
+            pipe.scheduler = UniPCMultistepScheduler.from_config(
+                pipe.scheduler.config
+            )
+            pipe.to(self.device)
+            self._pipe = pipe
+            print("  ControlNet loaded.")
         except Exception as e:
-            print(f"  Pix2Pix GAN unavailable ({type(e).__name__}), using procedural.")
-            self._backend = "procedural"
-
-    def _load_pix2pix(self):
-        """
-        Load pretrained Pix2Pix GAN from HuggingFace.
-        timbrooks/instruct-pix2pix — conditional GAN for image-to-image translation.
-        Same architecture as the model being trained on Kaggle.
-        """
-        import torch
-        from diffusers import StableDiffusionInstructPix2PixPipeline
-        print("  Loading Pix2Pix GAN (timbrooks/instruct-pix2pix)...")
-        self._pipe = StableDiffusionInstructPix2PixPipeline.from_pretrained(
-            "timbrooks/instruct-pix2pix",
-            torch_dtype=torch.float32,
-            safety_checker=None,
-        )
-        self._pipe.to(self.device)
-        self._backend = "pix2pix"
-        print("  Pix2Pix GAN loaded.")
+            print(f"  ControlNet unavailable ({e}), using procedural textures.")
+            self._pipe = None
 
     def generate(self, surface_type: str, size: int = 512) -> Image.Image:
+        """
+        Generate a texture image for the given surface type.
+
+        Args:
+            surface_type: 'wall', 'floor', 'door', 'window', 'ceiling'
+            size:         Output texture size in pixels
+
+        Returns:
+            PIL Image (RGB, size x size)
+        """
         self._load()
-        if self._backend == "pix2pix":
-            try:
-                return self._generate_pix2pix(surface_type, size)
-            except Exception as e:
-                print(f"  GAN generation failed ({e}), using procedural.")
-        return self._generate_procedural(surface_type, size)
 
-    def _generate_pix2pix(self, surface_type: str, size: int) -> Image.Image:
-        """Generate texture using Pix2Pix GAN."""
-        color = SURFACE_COLORS.get(surface_type, (174, 199, 232))
-        # Build a solid-color input image
-        input_img = Image.new("RGB", (size, size), color)
+        if self._pipe is not None:
+            return self._generate_controlnet(surface_type, size)
+        else:
+            return self._generate_procedural(surface_type, size)
 
-        prompts = {
-            "wall":    "seamless white plaster wall texture, flat surface, architectural",
-            "floor":   "seamless oak hardwood floor texture, top down view, architectural",
-            "door":    "seamless wooden door texture, light oak, architectural",
-            "window":  "frosted glass texture, translucent, architectural",
-            "ceiling": "seamless white ceiling texture, smooth plaster, architectural",
+    def _generate_controlnet(self, surface_type: str, size: int) -> Image.Image:
+        """Generate texture using ControlNet with a solid-color seg map."""
+        from gan_part.data.room_class_map import ADE20K_PALETTE
+
+        # Build a solid-color seg map for this surface type
+        color_map = {
+            "wall":    ADE20K_PALETTE[3][:3],    # grey
+            "floor":   ADE20K_PALETTE[4][:3],    # cyan
+            "door":    ADE20K_PALETTE[14][:3],   # dark red
+            "window":  ADE20K_PALETTE[8][:3],    # yellow
+            "ceiling": ADE20K_PALETTE[5][:3],    # pink
         }
-        prompt = prompts.get(surface_type, "seamless architectural surface texture")
+        color = color_map.get(surface_type, (120, 120, 120))
+        seg_map = Image.new("RGB", (size, size), color)
+
+        prompt   = SURFACE_PROMPTS.get(surface_type, SURFACE_PROMPTS["wall"])
+        negative = NEGATIVE_PROMPT
 
         result = self._pipe(
-            prompt=prompt,
-            image=input_img,
-            num_inference_steps=15,
-            image_guidance_scale=1.5,
-            guidance_scale=7.0,
+            prompt,
+            num_inference_steps=20,
+            image=seg_map,
+            negative_prompt=negative,
+            guidance_scale=7.5,
         ).images[0]
 
         return result.resize((size, size))
 
     def _generate_procedural(self, surface_type: str, size: int) -> Image.Image:
-        """Fast procedural texture — no AI, looks realistic."""
+        """
+        Fast procedural texture fallback — no AI needed.
+        Generates realistic-looking tileable textures using numpy.
+        """
         rng = np.random.default_rng(hash(surface_type) % (2**32))
+
         if surface_type == "floor":
-            return self._wood_texture(size, rng, (185, 148, 95))
+            return self._wood_texture(size, rng, base_color=(180, 140, 90))
         elif surface_type == "door":
-            return self._wood_texture(size, rng, (145, 105, 65))
+            return self._wood_texture(size, rng, base_color=(140, 100, 60))
         elif surface_type == "window":
             return self._glass_texture(size, rng)
         elif surface_type == "ceiling":
-            return self._plaster_texture(size, rng, (248, 246, 242))
+            return self._plaster_texture(size, rng, base_color=(245, 245, 240))
         else:  # wall
-            return self._plaster_texture(size, rng, (238, 232, 220))
+            return self._plaster_texture(size, rng, base_color=(235, 230, 220))
 
-    # ── Procedural textures ───────────────────────────────────────────────────
+    def _plaster_texture(self, size: int, rng, base_color: tuple) -> Image.Image:
+        """Smooth plaster/paint wall texture."""
+        r, g, b = base_color
+        # Base color with subtle noise
+        noise = rng.normal(0, 6, (size, size, 3))
+        img = np.clip(
+            np.array([r, g, b], dtype=np.float32) + noise,
+            0, 255
+        ).astype(np.uint8)
+        # Add very subtle large-scale variation
+        from PIL import ImageFilter
+        pil = Image.fromarray(img)
+        pil = pil.filter(ImageFilter.GaussianBlur(radius=2))
+        return pil
 
-    def _plaster_texture(self, size, rng, base_color):
-        noise = rng.normal(0, 5, (size, size, 3))
-        img = np.clip(np.array(base_color, dtype=np.float32) + noise, 0, 255).astype(np.uint8)
-        return Image.fromarray(img).filter(ImageFilter.GaussianBlur(1.5))
-
-    def _wood_texture(self, size, rng, base_color):
+    def _wood_texture(self, size: int, rng, base_color: tuple) -> Image.Image:
+        """Wood grain texture for floors and doors."""
         r, g, b = base_color
         img = np.zeros((size, size, 3), dtype=np.float32)
-        for y in range(size):
-            grain = np.sin(np.linspace(0, 18*np.pi, size) + rng.uniform(0, 2*np.pi)) * 18
-            br = 1.0 + grain / 255.0
-            img[y, :, 0] = np.clip(r * br, 0, 255)
-            img[y, :, 1] = np.clip(g * br, 0, 255)
-            img[y, :, 2] = np.clip(b * br, 0, 255)
-        noise = rng.normal(0, 3, (size, size, 3))
-        return Image.fromarray(np.clip(img + noise, 0, 255).astype(np.uint8))
 
-    def _glass_texture(self, size, rng):
-        base = np.array([210, 228, 245], dtype=np.float32)
-        noise = rng.normal(0, 8, (size, size, 3))
+        # Wood grain lines along X axis
+        for y in range(size):
+            # Grain variation
+            grain = np.sin(np.linspace(0, 20 * np.pi, size) +
+                           rng.uniform(0, 2 * np.pi)) * 15
+            brightness = 1.0 + grain / 255.0
+            img[y, :, 0] = np.clip(r * brightness, 0, 255)
+            img[y, :, 1] = np.clip(g * brightness, 0, 255)
+            img[y, :, 2] = np.clip(b * brightness, 0, 255)
+
+        # Add fine noise
+        noise = rng.normal(0, 4, (size, size, 3))
+        img = np.clip(img + noise, 0, 255).astype(np.uint8)
+        return Image.fromarray(img)
+
+    def _glass_texture(self, size: int, rng) -> Image.Image:
+        """Frosted glass texture for windows."""
+        # Light blue-white with subtle noise
+        base = np.array([200, 220, 240], dtype=np.float32)
+        noise = rng.normal(0, 10, (size, size, 3))
         img = np.clip(base + noise, 0, 255).astype(np.uint8)
-        return Image.fromarray(img).filter(ImageFilter.GaussianBlur(2))
+        # Add transparency hint via lighter color
+        from PIL import ImageFilter
+        pil = Image.fromarray(img)
+        pil = pil.filter(ImageFilter.GaussianBlur(radius=3))
+        return pil

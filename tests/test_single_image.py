@@ -8,8 +8,8 @@ This script shows you:
 3. Side-by-side comparison
 
 Usage:
-    python3 test_single_image.py samples/18_png.rf.4956b6043e9f9f738808088cfe37243d.jpg
-    python3 test_single_image.py samples/19_png.rf.5435466b5cc5a5cf9cbc1da0f911767b.jpg
+    python3 test_single_image.py samples/floorplan1.png
+    python3 test_single_image.py samples/floorplan2.png
     python3 test_single_image.py path/to/your/image.png
 """
 
@@ -46,12 +46,8 @@ def main():
     if len(sys.argv) > 1:
         input_image = sys.argv[1]
     else:
-        # Default to first available image in samples/
-        _samples = sorted(Path("samples").glob("*.jpg")) + sorted(Path("samples").glob("*.png"))
-        if not _samples:
-            print("❌ No images found in samples/")
-            sys.exit(1)
-        input_image = str(_samples[0])
+        # Default to floorplan2.png
+        input_image = "samples/floorplan2.png"
     
     if not os.path.exists(input_image):
         print(f"\n❌ Error: Image not found: {input_image}")

@@ -89,10 +89,16 @@ class ScaleEstimator:
         self,
         image: np.ndarray,
         vectorization_result=None,
-        segmentation_result=None,
     ) -> ScaleEstimate:
         """
         Estimate scale using all available strategies.
+
+        Args:
+            image:                Grayscale or BGR floor plan image.
+            vectorization_result: Optional VectorizationResult from Phase 3.
+
+        Returns:
+            ScaleEstimate with best available estimate.
         """
         # Strategy 1: OCR-based scale detection
         ocr_result = self._estimate_from_ocr(image)
@@ -105,24 +111,7 @@ class ScaleEstimator:
             if room_result is not None:
                 return room_result
 
-        # Strategy 3: Wall thickness heuristic (NEW)
-        # Walls are typically 10-20cm thick. Use the thinnest wall dimension
-        # as a scale reference — much more accurate than full image size.
-        if segmentation_result is not None:
-            wall_result = self._estimate_from_wall_thickness(segmentation_result)
-            if wall_result is not None:
-                return wall_result
-
-        # Strategy 4: Wall extents fallback (NEW)
-        # Use the extent of detected walls, not the full image size.
-        if segmentation_result is not None:
-            extent_result = self._estimate_from_wall_extents(
-                segmentation_result, image
-            )
-            if extent_result is not None:
-                return extent_result
-
-        # Strategy 5: Full image fallback (last resort)
+        # Strategy 3: Fallback
         return self._fallback_estimate(image)
 
     def pixels_to_metres(self, pixels: float, scale: ScaleEstimate) -> float:
@@ -256,7 +245,7 @@ class ScaleEstimator:
     def _fallback_estimate(self, image: np.ndarray) -> ScaleEstimate:
         """
         Fallback: assume standard floor plan proportions.
-        Uses wall extents if available, otherwise full image size.
+        A 1024px image typically represents a ~10-15m building footprint.
         """
         h, w = image.shape[:2]
         img_size = max(h, w)
@@ -270,84 +259,4 @@ class ScaleEstimator:
             confidence=0.30,
             method="fallback",
             notes=f"Fallback: assumed {assumed_building_size_m}m building at {img_size}px",
-        )
-
-    def _estimate_from_wall_thickness(
-        self, segmentation_result
-    ) -> Optional[ScaleEstimate]:
-        """
-        Use wall thickness as scale reference.
-        Walls are typically 10-20cm (0.10-0.20m) thick.
-        The thinnest dimension of a wall bbox = wall thickness.
-        """
-        wall_thicknesses_px = []
-        for elem in segmentation_result.elements:
-            if 'wall' not in elem.class_name.lower():
-                continue
-            x1, y1, x2, y2 = elem.bbox
-            w_px = abs(x2 - x1)
-            h_px = abs(y2 - y1)
-            thin = min(w_px, h_px)
-            # Only use clearly thin walls (not square bboxes)
-            aspect = max(w_px, h_px) / (thin + 1e-6)
-            if aspect > 3.0 and 2 < thin < 50:
-                wall_thicknesses_px.append(thin)
-
-        if len(wall_thicknesses_px) < 3:
-            return None
-
-        # Use median thickness — assume 0.15m standard wall thickness
-        median_thick_px = float(np.median(wall_thicknesses_px))
-        assumed_wall_thickness_m = 0.15
-        ppm = median_thick_px / assumed_wall_thickness_m
-
-        # Sanity check: 10-500 px/m
-        if not (10 <= ppm <= 500):
-            return None
-
-        return ScaleEstimate(
-            pixels_per_metre=ppm,
-            confidence=0.65,
-            method="wall_thickness",
-            notes=f"Median wall thickness: {median_thick_px:.1f}px = {assumed_wall_thickness_m}m",
-        )
-
-    def _estimate_from_wall_extents(
-        self, segmentation_result, image: np.ndarray
-    ) -> Optional[ScaleEstimate]:
-        """
-        Use the extent of detected walls (not full image) as building size.
-        Assumes a typical residential building is 8-15m on the longer axis.
-        """
-        if not segmentation_result.elements:
-            return None
-
-        wall_elems = [e for e in segmentation_result.elements
-                      if 'wall' in e.class_name.lower()]
-        if not wall_elems:
-            return None
-
-        # Get bounding box of all walls combined
-        all_x1 = min(e.bbox[0] for e in wall_elems)
-        all_y1 = min(e.bbox[1] for e in wall_elems)
-        all_x2 = max(e.bbox[2] for e in wall_elems)
-        all_y2 = max(e.bbox[3] for e in wall_elems)
-
-        wall_span_px = max(all_x2 - all_x1, all_y2 - all_y1)
-
-        if wall_span_px < 10:
-            return None
-
-        # Assume building is ~10m on the longer axis (typical residential)
-        assumed_building_m = 10.0
-        ppm = wall_span_px / assumed_building_m
-
-        if not (10 <= ppm <= 500):
-            return None
-
-        return ScaleEstimate(
-            pixels_per_metre=ppm,
-            confidence=0.50,
-            method="wall_extents",
-            notes=f"Wall span: {wall_span_px}px = {assumed_building_m}m",
         )
